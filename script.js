@@ -58,7 +58,10 @@ const VIDEOS_URL = `${SITE_BASE_URL}/videoconferencias`;
 
 const PYTHON_BIN = optionalEnv("PYTHON_BIN", "python3");
 const TRANSCRIBE_SCRIPT = path.resolve(__dirname, "transcribe.py");
-const MAX_VIDEOS = Math.max(1, Number.parseInt(optionalEnv("MAX_VIDEOS", "30"), 10) || 30);
+const configuredMaxVideos = Number.parseInt(optionalEnv("MAX_VIDEOS", "0"), 10);
+const MAX_VIDEOS = Number.isFinite(configuredMaxVideos) && configuredMaxVideos >= 0
+  ? configuredMaxVideos
+  : 0;
 const HEADLESS = optionalEnv("PUPPETEER_HEADLESS", "true").toLowerCase() !== "false";
 
 function sanitizeFilename(value) {
@@ -124,10 +127,88 @@ async function findDriveFileByName(drive, filename) {
   const escapedFolder = escapeDriveQueryValue(DRIVE_FOLDER_ID);
   const response = await drive.files.list({
     q: `name = '${escapedName}' and '${escapedFolder}' in parents and trashed = false`,
-    fields: "files(id,name,webViewLink)",
+    fields: "files(id,name,mimeType,size,trashed,parents,webViewLink)",
     pageSize: 1,
   });
   return response.data.files?.[0] || null;
+}
+
+function isUsableDriveFile(file) {
+  if (!file?.id || file.trashed) return false;
+  if (file.size != null && Number(file.size) <= 0) return false;
+  return true;
+}
+
+async function getDriveFileById(drive, fileId) {
+  if (!hasValue(fileId)) return null;
+  try {
+    const response = await drive.files.get({
+      fileId: String(fileId),
+      fields: "id,name,mimeType,size,trashed,parents,webViewLink",
+    });
+    if (!isUsableDriveFile(response.data)) return null;
+    return response.data;
+  } catch (error) {
+    const status = error?.code || error?.response?.status;
+    if (status === 404) return null;
+    throw error;
+  }
+}
+
+function extractDriveFileId(reference) {
+  const value = String(reference || "").trim();
+  if (!value) return "";
+  if (/^[A-Za-z0-9_-]{20,}$/.test(value)) return value;
+
+  const pathMatch = value.match(/\/d\/([A-Za-z0-9_-]+)/);
+  if (pathMatch?.[1]) return pathMatch[1];
+
+  try {
+    const parsed = new URL(value);
+    const queryId = parsed.searchParams.get("id");
+    if (queryId && /^[A-Za-z0-9_-]{20,}$/.test(queryId)) return queryId;
+  } catch (_) {
+    // Legacy local paths and malformed values are treated as stale references.
+  }
+
+  return "";
+}
+
+function canonicalDriveUrl(file) {
+  if (!file?.id) return "";
+  return file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`;
+}
+
+async function downloadDriveFileToPath(drive, fileId, destinationPath) {
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  const temporaryPath = `${destinationPath}.partial`;
+
+  try {
+    const response = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "stream" }
+    );
+
+    await new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(temporaryPath);
+      response.data.on("error", reject);
+      output.on("error", reject);
+      output.on("finish", resolve);
+      response.data.pipe(output);
+    });
+
+    if (!fileExistsAndNotEmpty(temporaryPath)) {
+      throw new Error(`Drive download produced an empty file for ${fileId}`);
+    }
+
+    fs.renameSync(temporaryPath, destinationPath);
+    console.log(`[DRIVE] Downloaded existing video to ${destinationPath}`);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch (_) {}
+    throw error;
+  }
 }
 
 async function uploadFileToDrive(drive, filePath, filename, mimeType) {
@@ -753,11 +834,10 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
     }
 
     const next = {
-      googleFileId: firstValue(state.driveFileId, record?.google_file_id),
-      transcriptionPath: firstValue(
-        state.transcriptionReference,
-        record?.transcription_path
-      ),
+      // The reconciled state is authoritative. Empty values intentionally clear
+      // stale database references so the next stage can rebuild them.
+      googleFileId: toDbValue(state.driveFileId),
+      transcriptionPath: toDbValue(state.transcriptionReference),
       audioPath: firstValue(record?.audio_path),
       title: firstValue(videoTitle, record?.video_title),
       summary: firstValue(record?.summary),
@@ -997,83 +1077,125 @@ async function processOneVideo(page, drive, video) {
   const record = await getVideoRecord(siteId, rawTitle);
   const manifest = findLatestProgressManifest(siteId);
   const state = buildInitialState(siteId, rawTitle, record, manifest);
+  const expectedVideoName = videoDriveName(siteId, rawTitle);
+  const expectedTranscriptName = transcriptDriveName(siteId, rawTitle);
 
-  let recoveredDriveState = false;
-  if (!hasValue(state.driveFileId)) {
-    const existingVideo = await findDriveFileByName(
-      drive,
-      videoDriveName(siteId, rawTitle)
-    );
-    if (existingVideo?.id) {
-      state.driveFileId = existingVideo.id;
-      recoveredDriveState = true;
-      console.log(`[DRIVE] Recovered video reference for ${siteId}`);
+  // Reconcile the video independently. A non-empty DB field is not considered
+  // healthy until the Drive file is proven to exist.
+  let remoteVideo = null;
+  if (hasValue(state.driveFileId)) {
+    remoteVideo = await getDriveFileById(drive, state.driveFileId);
+    if (!remoteVideo) {
+      console.log(`[REPAIR] Stale video reference for ${siteId}; searching Drive by name`);
+      state.driveFileId = "";
     }
   }
 
-  if (!hasValue(state.transcriptionReference)) {
-    const existingTranscript = await findDriveFileByName(
-      drive,
-      transcriptDriveName(siteId, rawTitle)
-    );
-    if (existingTranscript?.id) {
-      state.transcriptionReference =
-        existingTranscript.webViewLink ||
-        `https://drive.google.com/file/d/${existingTranscript.id}/view`;
-      recoveredDriveState = true;
-      console.log(`[DRIVE] Recovered transcript reference for ${siteId}`);
+  if (!remoteVideo) {
+    remoteVideo = await findDriveFileByName(drive, expectedVideoName);
+    if (remoteVideo?.id) {
+      state.driveFileId = remoteVideo.id;
+      console.log(`[REPAIR] Recovered video reference for ${siteId}`);
     }
   }
 
-  if (recoveredDriveState) {
-    await saveVideoProgress(siteId, rawTitle, state, record);
+  // Reconcile the transcript independently. Legacy local paths, malformed URLs,
+  // and deleted Drive files are treated as missing and regenerated.
+  let remoteTranscript = null;
+  const transcriptFileId = extractDriveFileId(state.transcriptionReference);
+  if (transcriptFileId) {
+    remoteTranscript = await getDriveFileById(drive, transcriptFileId);
+    if (!remoteTranscript) {
+      console.log(`[REPAIR] Stale transcript reference for ${siteId}; searching Drive by name`);
+      state.transcriptionReference = "";
+    }
+  } else if (hasValue(state.transcriptionReference)) {
+    console.log(`[REPAIR] Invalid transcript reference for ${siteId}; rebuilding it`);
+    state.transcriptionReference = "";
   }
 
-  const hasUpload = hasValue(state.driveFileId);
-  const hasTranscript = hasValue(state.transcriptionReference);
+  if (!remoteTranscript) {
+    remoteTranscript = await findDriveFileByName(drive, expectedTranscriptName);
+    if (remoteTranscript?.id) {
+      state.transcriptionReference = canonicalDriveUrl(remoteTranscript);
+      console.log(`[REPAIR] Recovered transcript reference for ${siteId}`);
+    }
+  } else {
+    state.transcriptionReference = canonicalDriveUrl(remoteTranscript);
+  }
 
-  if (hasUpload && hasTranscript) {
-    console.log(`[VIDEO] [SKIP] ${siteId} already has video and transcript`);
+  // Persist repaired references, including deliberate clearing of stale values.
+  await saveVideoProgress(siteId, rawTitle, state, record);
+
+  const hasPersistentVideo = Boolean(remoteVideo?.id);
+  const hasPersistentTranscript = Boolean(remoteTranscript?.id);
+
+  if (hasPersistentVideo && hasPersistentTranscript) {
+    console.log(`[VIDEO] [HEALTHY] ${siteId} has a valid video and transcript`);
     return;
   }
 
+  // Guarantee a local video only when a downstream stage needs it. Prefer the
+  // already-uploaded Drive copy; scrape Flor only when no persistent copy exists.
   if (!fileExistsAndNotEmpty(state.savePath)) {
-    await resolveAndDownloadVideo(page, siteId, rawTitle, state);
+    const outputDir = getOutputDirFromState(state);
+    fs.mkdirSync(outputDir, { recursive: true });
+    state.outputDir = outputDir;
+    state.saveName = expectedVideoName;
+    state.savePath = path.join(outputDir, expectedVideoName);
+
+    if (hasPersistentVideo) {
+      await withRetry(
+        () => downloadDriveFileToPath(drive, remoteVideo.id, state.savePath),
+        3,
+        10000
+      );
+      writeProgressManifest(state);
+    } else {
+      await resolveAndDownloadVideo(page, siteId, rawTitle, state);
+    }
   } else {
     console.log(`[DOWNLOAD] Existing local video: ${state.savePath}`);
   }
 
-  if (!hasValue(state.driveFileId) && fileExistsAndNotEmpty(state.savePath)) {
+  if (!hasPersistentVideo && fileExistsAndNotEmpty(state.savePath)) {
     const uploadedVideo = await withRetry(
       () =>
         uploadFileToDrive(
           drive,
           state.savePath,
-          state.saveName || path.basename(state.savePath),
+          expectedVideoName,
           "video/mp4"
         ),
       3,
       10000
     );
     state.driveFileId = uploadedVideo.id;
+    remoteVideo = await getDriveFileById(drive, uploadedVideo.id);
     writeProgressManifest(state);
     await saveVideoProgress(siteId, rawTitle, state, record);
   }
 
-  if (!hasTranscript && !fileExistsAndNotEmpty(state.processedAudio)) {
-    await processAudioFromVideo(state);
+  if (!hasPersistentTranscript) {
+    if (!fileExistsAndNotEmpty(state.processedAudio)) {
+      await processAudioFromVideo(state);
+    }
+    await ensureTranscript(drive, state, record);
   }
 
-  await ensureTranscript(drive, state, record);
   writeProgressManifest(state);
   await saveVideoProgress(siteId, rawTitle, state, record);
-  console.log(`[VIDEO] Finished ${siteId}`);
+  console.log(`[VIDEO] Finished repair pass for ${siteId}`);
 }
 
 // ------------------------------ MAIN ------------------------------
 
 async function scrapeData(limit = MAX_VIDEOS) {
-  console.log(`[START] One-shot run; checking latest ${limit} videos`);
+  console.log(
+    limit === 0
+      ? "[START] One-shot repair run; checking all available videos"
+      : `[START] One-shot repair run; checking latest ${limit} videos`
+  );
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
   fs.mkdirSync(FILES_DIR, { recursive: true });
 
@@ -1167,7 +1289,8 @@ async function scrapeData(limit = MAX_VIDEOS) {
     let videoconferencias = await page.evaluate(
       () => window.__NUXT__.data[0].videoconferencias
     );
-    videoconferencias = videoconferencias.reverse().slice(0, limit);
+    videoconferencias = videoconferencias.reverse();
+    if (limit > 0) videoconferencias = videoconferencias.slice(0, limit);
     console.log(`[VIDEOS] Found ${videoconferencias.length} candidate items`);
 
     for (const video of videoconferencias) {

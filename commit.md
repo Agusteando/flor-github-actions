@@ -1,1 +1,1 @@
-Automatiza la descarga y transcripción de videoconferencias con GitHub Actions
+Convierte la ingesta en un reconciliador autorreparable de videos y transcripciones

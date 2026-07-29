@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       max_videos:
-        description: "Latest videos to inspect"
+        description: "Videos to inspect (0 = all)"
         required: false
-        default: "30"
+        default: "0"
         type: string
 
 concurrency:
@@ -39,7 +39,7 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
       GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
 
-      MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '30' }}
+      MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '0' }}
       WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'large-v3' }}
       WHISPER_COMPUTE_TYPE: int8
       WHISPER_LANGUAGE: es
@@ -55,7 +55,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Set up Python
         uses: actions/setup-python@v5
