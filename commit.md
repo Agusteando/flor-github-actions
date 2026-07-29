@@ -1,1 +1,1 @@
-Convierte la ingesta en un reconciliador autorreparable de videos y transcripciones
+Corrige las dependencias de transcripción y valida el entorno antes de procesar videos

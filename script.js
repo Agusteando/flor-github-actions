@@ -280,6 +280,21 @@ function runProcess(command, args, options = {}) {
   });
 }
 
+async function validateTranscriptionRuntime() {
+  if (!fs.existsSync(TRANSCRIBE_SCRIPT)) {
+    throw new Error(`Missing transcription helper: ${TRANSCRIBE_SCRIPT}`);
+  }
+
+  await runProcess(PYTHON_BIN, [
+    "-c",
+    [
+      "import requests",
+      "from faster_whisper import WhisperModel",
+      "print('[PREFLIGHT] Python transcription runtime is ready', flush=True)",
+    ].join("; "),
+  ]);
+}
+
 async function transcribeAudio(audioFilePath, outputPath) {
   if (!fs.existsSync(TRANSCRIBE_SCRIPT)) {
     throw new Error(`Missing transcription helper: ${TRANSCRIBE_SCRIPT}`);
@@ -1196,6 +1211,11 @@ async function scrapeData(limit = MAX_VIDEOS) {
       ? "[START] One-shot repair run; checking all available videos"
       : `[START] One-shot repair run; checking latest ${limit} videos`
   );
+
+  // Fail before opening the browser, changing ledger state, or downloading media
+  // when the disposable runner is missing a required transcription dependency.
+  await validateTranscriptionRuntime();
+
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
   fs.mkdirSync(FILES_DIR, { recursive: true });
 
