@@ -1,0 +1,100 @@
+name: Flor recording ingestion
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+      timezone: "America/Mexico_City"
+  workflow_dispatch:
+    inputs:
+      max_videos:
+        description: "Latest videos to inspect"
+        required: false
+        default: "30"
+        type: string
+
+concurrency:
+  group: flor-recording-ingestion
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      FLOR_USERNAME: ${{ secrets.FLOR_USERNAME }}
+      FLOR_PASSWORD: ${{ secrets.FLOR_PASSWORD }}
+      FLOR_SITE_BASE_URL: ${{ vars.FLOR_SITE_BASE_URL || 'https://buenainfancia.com.mx' }}
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+      GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
+
+      MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '30' }}
+      WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'large-v3' }}
+      WHISPER_COMPUTE_TYPE: int8
+      WHISPER_LANGUAGE: es
+      WHISPER_CPU_THREADS: "2"
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      PUPPETEER_CACHE_DIR: ${{ github.workspace }}/.cache/puppeteer
+      PUPPETEER_HEADLESS: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Restore browser and Whisper caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/puppeteer
+            .cache/huggingface
+          key: ${{ runner.os }}-flor-models-${{ hashFiles('requirements.txt', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-flor-models-
+
+      - name: Install Node dependencies
+        run: npm install --omit=dev
+
+      - name: Install Chrome for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Install Python dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Validate JavaScript
+        run: npm run check
+
+      - name: Download and transcribe missing recordings
+        run: npm start
+
+      - name: Upload diagnostics after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flor-ingestion-diagnostics-${{ github.run_id }}
+          path: |
+            diag_*.png
+            files/**/*_progress.json
+          if-no-files-found: ignore
+          retention-days: 7

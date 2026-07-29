@@ -1,0 +1,10 @@
+node_modules/
+.runtime/
+files/
+.cache/
+credentials.json
+.env
+*.log
+diag_*.png
+__pycache__/
+*.pyc
