@@ -2,7 +2,7 @@
   "name": "flor-conference-ingestion",
   "version": "1.0.0",
   "private": true,
-  "description": "One-shot GitHub Actions worker for Flor conference downloads and transcription.",
+  "description": "One-shot GitHub Actions worker using the required Vimeo downloader extension for Flor conference ingestion and transcription.",
   "main": "script.js",
   "scripts": {
     "start": "node script.js",

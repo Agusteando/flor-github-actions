@@ -1,1 +1,1 @@
-Corrige las dependencias de transcripción y valida el entorno antes de procesar videos
+Integra la extensión de Vimeo en el ingestor de GitHub Actions

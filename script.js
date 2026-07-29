@@ -1,6 +1,7 @@
 // script.js
 // One-shot GitHub Actions worker for Flor videoconferences.
-// Discovers and downloads Vimeo recordings, uploads the video to Google Drive,
+// Loads the supplied Vimeo downloader extension, uses its injected media links,
+// downloads recordings, uploads the video to Google Drive,
 // extracts audio, transcribes locally with faster-whisper, uploads the transcript,
 // and records progress in the existing MySQL videos table.
 
@@ -62,7 +63,76 @@ const configuredMaxVideos = Number.parseInt(optionalEnv("MAX_VIDEOS", "0"), 10);
 const MAX_VIDEOS = Number.isFinite(configuredMaxVideos) && configuredMaxVideos >= 0
   ? configuredMaxVideos
   : 0;
-const HEADLESS = optionalEnv("PUPPETEER_HEADLESS", "true").toLowerCase() !== "false";
+const HEADLESS = optionalEnv("PUPPETEER_HEADLESS", "false").toLowerCase() !== "false";
+const VIMEO_EXTENSION_ID = optionalEnv(
+  "VIMEO_EXTENSION_ID",
+  "penndbmahnpapepljikkjmakcobdahne"
+);
+const VIMEO_EXTENSION_DIR = path.resolve(
+  optionalEnv(
+    "VIMEO_EXTENSION_DIR",
+    path.join(
+      __dirname,
+      ".runtime",
+      "vimeo-extension",
+      "penndbmahnpapepljikkjmakcobdahne"
+    )
+  )
+);
+
+function validateVimeoExtensionFiles() {
+  const manifestPath = path.join(VIMEO_EXTENSION_DIR, "manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(
+      `Vimeo downloader extension is missing: ${manifestPath}`
+    );
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Vimeo extension manifest is invalid: ${error.message}`);
+  }
+
+  if (!manifest.version || !manifest.manifest_version) {
+    throw new Error("Vimeo extension manifest is incomplete");
+  }
+
+  console.log(
+    `[EXTENSION] Files ready: ${VIMEO_EXTENSION_ID} v${manifest.version}`
+  );
+}
+
+async function verifyLoadedVimeoExtension(browser) {
+  const verificationPage = await browser.newPage();
+  try {
+    await verificationPage.goto(
+      `chrome-extension://${VIMEO_EXTENSION_ID}/popup.html`,
+      { waitUntil: "domcontentloaded", timeout: 20000 }
+    );
+
+    const manifest = await verificationPage.evaluate(() => {
+      if (!globalThis.chrome?.runtime?.getManifest) return null;
+      const value = chrome.runtime.getManifest();
+      return { name: value.name, version: value.version };
+    });
+
+    if (!manifest?.version) {
+      throw new Error("Chrome did not expose the extension runtime");
+    }
+
+    console.log(
+      `[EXTENSION] Loaded in Chrome: ${VIMEO_EXTENSION_ID} v${manifest.version}`
+    );
+  } catch (error) {
+    throw new Error(
+      `Vimeo downloader extension did not load: ${error.message}`
+    );
+  } finally {
+    await verificationPage.close().catch(() => {});
+  }
+}
 
 function sanitizeFilename(value) {
   return String(value || "").replace(/[\/\\:*?"<>|]/g, "").trim();
@@ -427,6 +497,91 @@ function downloadHlsWithFfmpeg(hlsUrl, outPath, referer) {
       })
       .save(outPath);
   });
+}
+
+/**
+ * Read the download URLs injected by the installed Vimeo downloader extension.
+ * This is the primary resolver because the original local Puppeteer profile
+ * depended on that extension being installed.
+ */
+async function resolveVimeoStreamsFromExtension(vimeoFrame, timeoutMs = 25000) {
+  try {
+    await vimeoFrame.waitForFunction(
+      () =>
+        document.body?.getAttribute("inject_vt_svd") ||
+        document.querySelector(
+          ".__vt-svd-group__, .__vt-svd-download__, .vt-web-download[hlsurl]"
+        ),
+      { timeout: timeoutMs, polling: 500 }
+    );
+  } catch {
+    return null;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resolved = await vimeoFrame.evaluate(() => {
+      const qualityFrom = (...values) => {
+        const text = values.filter(Boolean).join(" ");
+        const match = text.match(/(?:^|\D)(\d{3,4})p?(?:\D|$)/i);
+        return match ? Number.parseInt(match[1], 10) : Infinity;
+      };
+
+      const progressive = Array.from(
+        document.querySelectorAll(".__vt-svd-download__ a[href]")
+      )
+        .map((anchor) => ({
+          url: anchor.href,
+          height: qualityFrom(
+            anchor.textContent,
+            anchor.title,
+            anchor.getAttribute("download"),
+            anchor.id
+          ),
+        }))
+        .filter(
+          (item) =>
+            /^https?:\/\//i.test(item.url) &&
+            !/chrome-extension:/i.test(item.url)
+        );
+
+      const hlsVariants = Array.from(
+        document.querySelectorAll(".vt-web-download[hlsurl]")
+      )
+        .map((element) => ({
+          url: element.getAttribute("hlsurl") || "",
+          height: qualityFrom(
+            element.getAttribute("qid"),
+            element.textContent,
+            element.title
+          ),
+        }))
+        .filter((item) => /^https?:\/\//i.test(item.url));
+
+      return {
+        referer: location.href,
+        progressive,
+        hlsVariants,
+      };
+    });
+
+    if (resolved.progressive.length || resolved.hlsVariants.length) {
+      const lowestHls = resolved.hlsVariants
+        .slice()
+        .sort((left, right) => left.height - right.height)[0];
+      return {
+        source: "extension",
+        referer: resolved.referer,
+        progressive: resolved.progressive,
+        hlsMaster: lowestHls?.url || null,
+        hlsVariants: resolved.hlsVariants,
+      };
+    }
+
+    await sleep(500);
+  }
+
+  return null;
 }
 
 /**
@@ -932,14 +1087,33 @@ async function resolveAndDownloadVideo(page, siteId, rawTitle, state) {
   }
 
   const vimeoFrame = info.frame;
-  const resolved = await resolveVimeoStreams(page, vimeoFrame);
+  let resolved = await resolveVimeoStreamsFromExtension(vimeoFrame);
+
+  if (resolved) {
+    console.log(
+      `[EXTENSION] Resolved ${resolved.progressive.length} direct link(s)` +
+        `${resolved.hlsVariants?.length ? ` and ${resolved.hlsVariants.length} HLS link(s)` : ""}`
+    );
+  } else {
+    console.warn(
+      `[EXTENSION][WARN] No injected link found for ${siteId}; using the programmatic fallback`
+    );
+    resolved = await resolveVimeoStreams(page, vimeoFrame);
+  }
+
   if (!resolved || (!resolved.hlsMaster && !resolved.progressive?.length)) {
     await dumpSmallDomSample(vimeoFrame, "Iframe");
     throw new Error("Could not resolve Vimeo streams (no HLS/progressive)");
   }
 
   let chosenUrl = null;
-  if (resolved.hlsMaster) {
+  if (resolved.source === "extension" && resolved.progressive?.length) {
+    const lowest = chooseLowestVariant(resolved.progressive);
+    chosenUrl = lowest?.url || null;
+    console.log(
+      `[STREAM] Using extension MP4 (${Number.isFinite(lowest?.height) ? `${lowest.height}p` : "unknown"})`
+    );
+  } else if (resolved.hlsMaster) {
     try {
       const text = await vimeoFrame.evaluate(
         async (master, referer) => {
@@ -1212,15 +1386,22 @@ async function scrapeData(limit = MAX_VIDEOS) {
       : `[START] One-shot repair run; checking latest ${limit} videos`
   );
 
-  // Fail before opening the browser, changing ledger state, or downloading media
-  // when the disposable runner is missing a required transcription dependency.
+  // Fail before opening Flor, changing ledger state, or downloading media
+  // when the disposable runner is missing a required runtime dependency.
   await validateTranscriptionRuntime();
+  validateVimeoExtensionFiles();
+
+  if (HEADLESS) {
+    throw new Error(
+      "PUPPETEER_HEADLESS must be false because Chrome extensions require a headed browser under Xvfb"
+    );
+  }
 
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
   fs.mkdirSync(FILES_DIR, { recursive: true });
 
   const browser = await puppeteer.launch({
-    headless: HEADLESS,
+    headless: false,
     userDataDir: USER_DATA_DIR,
     defaultViewport: { width: 1440, height: 1000 },
     args: [
@@ -1229,11 +1410,14 @@ async function scrapeData(limit = MAX_VIDEOS) {
       "--disable-dev-shm-usage",
       "--no-first-run",
       "--no-default-browser-check",
+      `--disable-extensions-except=${VIMEO_EXTENSION_DIR}`,
+      `--load-extension=${VIMEO_EXTENSION_DIR}`,
     ],
   });
 
   let hadItemFailures = false;
   try {
+    await verifyLoadedVimeoExtension(browser);
     const pages = await browser.pages();
     const page = pages[0] || (await browser.newPage());
 
