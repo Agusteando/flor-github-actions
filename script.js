@@ -1008,10 +1008,9 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
     }
 
     const next = {
-      // The reconciled state is authoritative. Missing optional references are
-      // stored as SQL NULL, never as an empty string. This matters because
-      // google_file_id has a unique index and MySQL permits multiple NULLs but
-      // not multiple empty strings.
+      // The reconciled state is authoritative. google_file_id uses SQL NULL
+      // while missing because it has a unique index. The legacy text columns
+      // remain empty strings because the production schema marks them NOT NULL.
       googleFileId: state.driveFileId,
       transcriptionPath: state.transcriptionReference,
       audioPath: firstValue(record?.audio_path),
@@ -1026,10 +1025,10 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
          WHERE id = ?`,
         [
           toNullableDbValue(next.googleFileId),
-          toNullableDbValue(next.transcriptionPath),
-          toNullableDbValue(next.audioPath),
+          toDbValue(next.transcriptionPath),
+          toDbValue(next.audioPath),
           toDbValue(next.title),
-          toNullableDbValue(next.summary),
+          toDbValue(next.summary),
           record.id,
         ]
       );
@@ -1046,10 +1045,10 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
         [
           siteId,
           toNullableDbValue(next.googleFileId),
-          toNullableDbValue(next.transcriptionPath),
-          toNullableDbValue(next.audioPath),
+          toDbValue(next.transcriptionPath),
+          toDbValue(next.audioPath),
           toDbValue(next.title),
-          toNullableDbValue(next.summary),
+          toDbValue(next.summary),
         ]
       );
       console.log(`[DB] Progress inserted for ${siteId}`);

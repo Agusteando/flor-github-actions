@@ -1,1 +1,1 @@
-Usa FFmpeg moderno para descargar correctamente transmisiones HLS de Vimeo
+Respeta las columnas obligatorias al guardar el progreso de transcripción
