@@ -81,13 +81,15 @@ jobs:
       - name: Install Chrome for Puppeteer
         run: npx puppeteer browsers install chrome
 
-      - name: Prepare Vimeo downloader extension
+      - name: Prepare Chrome and media runtime
         run: |
           rm -rf .runtime/vimeo-extension
           mkdir -p .runtime/vimeo-extension
           unzip -q penndbmahnpapepljikkjmakcobdahne.zip -d .runtime/vimeo-extension
           test -f "$VIMEO_EXTENSION_DIR/manifest.json"
-          command -v xvfb-run >/dev/null || (sudo apt-get update && sudo apt-get install -y xvfb)
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg
+          ffmpeg -version | head -n 1
 
       - name: Install Python dependencies
         run: python -m pip install --requirement requirements.txt

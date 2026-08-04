@@ -1,6 +1,7 @@
 // script.js
 // One-shot GitHub Actions worker for Flor videoconferences.
-// Loads the supplied Vimeo downloader extension, uses its injected media links,
+// Loads the supplied Vimeo downloader extension for browser parity, resolves
+// Vimeo streams through the signed player configuration used by the reference script,
 // downloads recordings, uploads the video to Google Drive,
 // extracts audio, transcribes locally with faster-whisper, uploads the transcript,
 // and records progress in the existing MySQL videos table.
@@ -20,13 +21,9 @@ puppeteer.use(StealthPlugin());
 const mysql = require("mysql2/promise");
 const ffmpegCli = require("fluent-ffmpeg");
 
-let ffmpegInstallerPath = null;
-try {
-  ffmpegInstallerPath = require("@ffmpeg-installer/ffmpeg").path;
-  if (ffmpegInstallerPath) ffmpegCli.setFfmpegPath(ffmpegInstallerPath);
-} catch (_) {
-  // System ffmpeg must be in PATH.
-}
+// GitHub runners use Ubuntu's maintained FFmpeg package. The bundled
+// @ffmpeg-installer binary is from 2018 and crashes on current Vimeo HLS.
+ffmpegCli.setFfmpegPath(process.env.FFMPEG_PATH || "ffmpeg");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -472,7 +469,7 @@ function downloadHlsWithFfmpeg(hlsUrl, outPath, referer) {
     `Referer: ${referer}`,
     `Origin: https://player.vimeo.com`,
     `User-Agent: Mozilla/5.0`,
-  ].join("\r\n");
+  ].join("\r\n") + "\r\n";
 
   return new Promise((resolve, reject) => {
     ffmpegCli(hlsUrl)
@@ -491,6 +488,9 @@ function downloadHlsWithFfmpeg(hlsUrl, outPath, referer) {
       })
       .on("end", () => resolve())
       .on("error", (err, _stdout, stderr) => {
+        try {
+          if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+        } catch {}
         console.error("[FFMPEG][ERR]", err && err.message ? err.message : err);
         if (stderr) console.error("[FFMPEG][STDERR]", String(stderr).slice(0, 2000));
         reject(err);
