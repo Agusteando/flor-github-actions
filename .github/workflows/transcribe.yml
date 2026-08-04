@@ -9,7 +9,7 @@ on:
       max_videos:
         description: "Videos to inspect (0 = all)"
         required: false
-        default: "0"
+        default: "1"
         type: string
 
 concurrency:
@@ -39,7 +39,7 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
       GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
 
-      MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '0' }}
+      MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '1' }}
       WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'large-v3' }}
       WHISPER_COMPUTE_TYPE: int8
       WHISPER_LANGUAGE: es

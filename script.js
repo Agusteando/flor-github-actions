@@ -56,7 +56,7 @@ const VIDEOS_URL = `${SITE_BASE_URL}/videoconferencias`;
 
 const PYTHON_BIN = optionalEnv("PYTHON_BIN", "python3");
 const TRANSCRIBE_SCRIPT = path.resolve(__dirname, "transcribe.py");
-const configuredMaxVideos = Number.parseInt(optionalEnv("MAX_VIDEOS", "0"), 10);
+const configuredMaxVideos = Number.parseInt(optionalEnv("MAX_VIDEOS", "1"), 10);
 const MAX_VIDEOS = Number.isFinite(configuredMaxVideos) && configuredMaxVideos >= 0
   ? configuredMaxVideos
   : 0;

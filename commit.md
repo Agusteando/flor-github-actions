@@ -1,1 +1,1 @@
-Respeta las columnas obligatorias al guardar el progreso de transcripción
+Usa un video como límite predeterminado de la ingesta
