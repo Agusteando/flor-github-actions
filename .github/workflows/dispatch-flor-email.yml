@@ -1,0 +1,34 @@
+name: Dispatch Flor summary email
+
+on:
+  push:
+    paths:
+      - .dispatch/flor-email.json
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read dispatch request
+        id: request
+        shell: bash
+        run: |
+          OUTBOX_ID="$(jq -r '.outbox_id // empty' .dispatch/flor-email.json)"
+          if [ -z "$OUTBOX_ID" ]; then
+            echo "Missing outbox_id in .dispatch/flor-email.json" >&2
+            exit 1
+          fi
+          echo "outbox_id=$OUTBOX_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger sender workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTBOX_ID: ${{ steps.request.outputs.outbox_id }}
+        run: gh workflow run send-outbox.yml --ref main -f outbox_id="$OUTBOX_ID"
