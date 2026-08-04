@@ -1087,85 +1087,70 @@ function buildInitialState(siteId, rawTitle, record, manifest) {
 }
 
 async function resolveAndDownloadVideo(page, siteId, rawTitle, state) {
-  await page.goto(`${VIDEOS_URL}/${siteId}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${VIDEOS_URL}/${siteId}`, {
+    waitUntil: "domcontentloaded",
+  });
 
   const info = await extractVimeoFrame(page);
-  if (!info?.frame) {
+  if (!info || !info.frame) {
     await dumpSmallDomSample(page.mainFrame(), "Top");
     await takeScreenshot(page, `diag_no_iframe_${siteId}.png`);
     throw new Error("No Vimeo iframe found on page");
   }
-
   const vimeoFrame = info.frame;
-  let resolved = await resolveVimeoStreamsFromExtension(vimeoFrame);
 
-  if (resolved) {
-    console.log(
-      `[EXTENSION] Resolved ${resolved.progressive.length} direct link(s)` +
-        `${resolved.hlsVariants?.length ? ` and ${resolved.hlsVariants.length} HLS link(s)` : ""}`
-    );
-  } else {
-    console.warn(
-      `[EXTENSION][WARN] No injected link found for ${siteId}; using the programmatic fallback`
-    );
-    resolved = await resolveVimeoStreams(page, vimeoFrame);
-  }
-
-  if (!resolved || (!resolved.hlsMaster && !resolved.progressive?.length)) {
+  // Keep the extension loaded for parity with the original browser profile,
+  // but resolve and choose the media exactly as the supplied reference script:
+  // signed Vimeo config -> HLS first -> lowest HLS variant -> progressive fallback.
+  const resolved = await resolveVimeoStreams(page, vimeoFrame);
+  if (
+    !resolved ||
+    (!resolved.hlsMaster && (!resolved.progressive || resolved.progressive.length === 0))
+  ) {
     await dumpSmallDomSample(vimeoFrame, "Iframe");
     throw new Error("Could not resolve Vimeo streams (no HLS/progressive)");
   }
 
   let chosenUrl = null;
-  if (resolved.source === "extension" && resolved.progressive?.length) {
-    const lowest = chooseLowestVariant(resolved.progressive);
-    chosenUrl = lowest?.url || null;
-    console.log(
-      `[STREAM] Using extension MP4 (${Number.isFinite(lowest?.height) ? `${lowest.height}p` : "unknown"})`
-    );
-  } else if (resolved.hlsMaster) {
+  if (resolved.hlsMaster) {
     try {
       const text = await vimeoFrame.evaluate(
-        async (master, referer) => {
-          const response = await fetch(master, {
+        async (master, ref) => {
+          const r = await fetch(master, {
             credentials: "include",
-            headers: { Referer: referer },
+            headers: { Referer: ref },
           });
-          return response.text();
+          return await r.text();
         },
         resolved.hlsMaster,
         resolved.referer || "https://player.vimeo.com/"
       );
-
       const lines = String(text || "").split("\n");
       const variants = [];
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = (lines[index] || "").trim();
-        if (!line.startsWith("#EXT-X-STREAM-INF")) continue;
-
-        const resolution = line.match(/RESOLUTION=\s*(\d+)\s*x\s*(\d+)/i);
-        const height = resolution ? Number.parseInt(resolution[2], 10) : Infinity;
-        const nextLine = (lines[index + 1] || "").trim();
-        if (nextLine && !nextLine.startsWith("#")) {
-          variants.push({
-            url: new URL(nextLine, resolved.hlsMaster).toString(),
-            height,
-          });
+      for (let i = 0; i < lines.length; i++) {
+        const L = (lines[i] || "").trim();
+        if (L.startsWith("#EXT-X-STREAM-INF")) {
+          const mh = L.match(/RESOLUTION=\s*(\d+)\s*x\s*(\d+)/i);
+          const height = mh ? parseInt(mh[2], 10) : Infinity;
+          const next = (lines[i + 1] || "").trim();
+          if (next && !next.startsWith("#")) {
+            const abs = new URL(next, resolved.hlsMaster).toString();
+            variants.push({ url: abs, height });
+          }
         }
       }
-
-      const lowest = chooseLowestVariant(variants);
-      chosenUrl = lowest?.url || resolved.hlsMaster;
-      console.log(`[STREAM] Using HLS (${lowest ? `${lowest.height}p` : "master"})`);
+      const low = chooseLowestVariant(variants);
+      chosenUrl = low ? low.url : resolved.hlsMaster;
+      console.log(`[STREAM] Using HLS (${low ? `${low.height}p` : "master"})`);
     } catch {
       chosenUrl = resolved.hlsMaster;
-      console.log("[STREAM] Using HLS master; variant parsing failed");
+      console.log("[STREAM] Using HLS (master, variant parse failed)");
     }
-  } else {
-    const lowest = chooseLowestVariant(resolved.progressive);
-    chosenUrl = lowest?.url || null;
+  } else if (resolved.progressive && resolved.progressive.length) {
+    const low = chooseLowestVariant(resolved.progressive);
+    chosenUrl = low.url;
     console.log(
-      `[STREAM] Using progressive MP4 (${Number.isFinite(lowest?.height) ? `${lowest.height}p` : "unknown"})`
+      `[STREAM] Using progressive MP4 (${isFinite(low.height) ? `${low.height}p` : "unknown"})`
     );
   }
 
