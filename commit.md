@@ -1,1 +1,1 @@
-Integra la extensión de Vimeo en el ingestor de GitHub Actions
+Corrige la inserción de conferencias sin identificador de Google Drive

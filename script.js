@@ -850,6 +850,10 @@ function toDbValue(value) {
   return hasValue(value) ? String(value) : "";
 }
 
+function toNullableDbValue(value) {
+  return hasValue(value) ? String(value) : null;
+}
+
 function walkFiles(rootDir) {
   const out = [];
   if (!rootDir || !fs.existsSync(rootDir)) return out;
@@ -1004,10 +1008,12 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
     }
 
     const next = {
-      // The reconciled state is authoritative. Empty values intentionally clear
-      // stale database references so the next stage can rebuild them.
-      googleFileId: toDbValue(state.driveFileId),
-      transcriptionPath: toDbValue(state.transcriptionReference),
+      // The reconciled state is authoritative. Missing optional references are
+      // stored as SQL NULL, never as an empty string. This matters because
+      // google_file_id has a unique index and MySQL permits multiple NULLs but
+      // not multiple empty strings.
+      googleFileId: state.driveFileId,
+      transcriptionPath: state.transcriptionReference,
       audioPath: firstValue(record?.audio_path),
       title: firstValue(videoTitle, record?.video_title),
       summary: firstValue(record?.summary),
@@ -1019,15 +1025,19 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
          SET google_file_id = ?, transcription_path = ?, audio_path = ?, video_title = ?, summary = ?
          WHERE id = ?`,
         [
-          toDbValue(next.googleFileId),
-          toDbValue(next.transcriptionPath),
-          toDbValue(next.audioPath),
+          toNullableDbValue(next.googleFileId),
+          toNullableDbValue(next.transcriptionPath),
+          toNullableDbValue(next.audioPath),
           toDbValue(next.title),
-          toDbValue(next.summary),
+          toNullableDbValue(next.summary),
           record.id,
         ]
       );
       console.log(`[DB] Progress updated for ${record.id}`);
+    } else if (!hasValue(next.googleFileId)) {
+      // Do not create a placeholder row with google_file_id=''. The video is
+      // downloaded/uploaded first, and the row is inserted on the next save.
+      console.log(`[DB] Insert deferred for ${siteId}; Drive video ID is not ready`);
     } else {
       await connection.execute(
         `INSERT INTO videos
@@ -1035,11 +1045,11 @@ async function saveVideoProgress(siteId, videoTitle, state, existingRecord = nul
          VALUES (?, ?, ?, ?, ?, ?)`,
         [
           siteId,
-          toDbValue(next.googleFileId),
-          toDbValue(next.transcriptionPath),
-          toDbValue(next.audioPath),
+          toNullableDbValue(next.googleFileId),
+          toNullableDbValue(next.transcriptionPath),
+          toNullableDbValue(next.audioPath),
           toDbValue(next.title),
-          toDbValue(next.summary),
+          toNullableDbValue(next.summary),
         ]
       );
       console.log(`[DB] Progress inserted for ${siteId}`);
