@@ -1,0 +1,12 @@
+{
+  "name": "flor-summary-email-sender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lightweight Gmail API sender for Flor summary outbox rows.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

@@ -1,0 +1,45 @@
+name: Flor summary email sender
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: flor-summary-email-sender
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
+      FLOR_WORK_LEDGER_SPREADSHEET_ID: ${{ vars.FLOR_WORK_LEDGER_SPREADSHEET_ID || '1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA' }}
+      FLOR_OUTBOX_SHEET: Outbox
+      FLOR_LEDGER_SHEET: Ledger
+      FLOR_EMAIL_SIGNATURE_URL: https://expediente.casitaapps.com/signatures/desarrollo_tecnologico_casitaiedis_edu_mx.jpg?v=1784669030140
+      TZ: America/Mexico_City
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install sender dependency
+        run: npm install --prefix sender --omit=dev
+
+      - name: Validate sender
+        run: node --check sender/send_outbox.js
+
+      - name: Send pending Flor summary emails
+        run: node sender/send_outbox.js

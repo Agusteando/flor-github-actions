@@ -1,1 +1,1 @@
-Actualiza diariamente la próxima videoconferencia en el ledger de Flor
+Añade cola segura y envío HTML de resúmenes por Gmail
