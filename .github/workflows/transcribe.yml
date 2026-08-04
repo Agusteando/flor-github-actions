@@ -38,6 +38,8 @@ jobs:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
       GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
+      FLOR_WORK_LEDGER_SPREADSHEET_ID: ${{ vars.FLOR_WORK_LEDGER_SPREADSHEET_ID || '1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA' }}
+      FLOR_WORK_LEDGER_SCHEDULE_SHEET: Schedule
 
       MAX_VIDEOS: ${{ github.event.inputs.max_videos || vars.MAX_VIDEOS || '1' }}
       WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'large-v3' }}
@@ -47,6 +49,7 @@ jobs:
       HF_HOME: ${{ github.workspace }}/.cache/huggingface
       PUPPETEER_CACHE_DIR: ${{ github.workspace }}/.cache/puppeteer
       PUPPETEER_HEADLESS: "false"
+      TZ: America/Mexico_City
       VIMEO_EXTENSION_ID: penndbmahnpapepljikkjmakcobdahne
       VIMEO_EXTENSION_DIR: ${{ github.workspace }}/.runtime/vimeo-extension/penndbmahnpapepljikkjmakcobdahne
 

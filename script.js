@@ -8,6 +8,8 @@
 
 "use strict";
 
+process.env.TZ = process.env.TZ || "America/Mexico_City";
+
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
@@ -48,6 +50,14 @@ const FILES_DIR = path.resolve(__dirname, "files");
 const DRIVE_FOLDER_ID = requiredEnv("GOOGLE_DRIVE_FOLDER_ID");
 const GOOGLE_IMPERSONATED_USER = optionalEnv("GOOGLE_IMPERSONATED_USER");
 const GOOGLE_SERVICE_ACCOUNT_JSON = requiredEnv("GOOGLE_SERVICE_ACCOUNT_JSON");
+const WORK_LEDGER_SPREADSHEET_ID = optionalEnv(
+  "FLOR_WORK_LEDGER_SPREADSHEET_ID",
+  "1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA"
+);
+const WORK_LEDGER_SCHEDULE_SHEET = optionalEnv(
+  "FLOR_WORK_LEDGER_SCHEDULE_SHEET",
+  "Schedule"
+);
 
 const USERNAME = requiredEnv("FLOR_USERNAME");
 const PASSWORD = requiredEnv("FLOR_PASSWORD");
@@ -172,7 +182,10 @@ async function getDatabaseConnection() {
 }
 
 async function authorize(credentials) {
-  const scopes = ["https://www.googleapis.com/auth/drive"];
+  const scopes = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+  ];
   const jwtClient = new google.auth.JWT(
     credentials.client_email,
     null,
@@ -187,6 +200,318 @@ async function authorize(credentials) {
 
 function escapeDriveQueryValue(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+
+const SPANISH_MONTHS = new Map([
+  ["enero", 0],
+  ["febrero", 1],
+  ["marzo", 2],
+  ["abril", 3],
+  ["mayo", 4],
+  ["junio", 5],
+  ["julio", 6],
+  ["agosto", 7],
+  ["septiembre", 8],
+  ["setiembre", 8],
+  ["octubre", 9],
+  ["noviembre", 10],
+  ["diciembre", 11],
+]);
+
+function normalizeForMatching(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function formatDateOnly(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatLocalDateTime(date) {
+  const datePart = formatDateOnly(date);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${datePart} ${hours}:${minutes}`;
+}
+
+function validCalendarDate(year, monthIndex, day, hours = 0, minutes = 0) {
+  const date = new Date(year, monthIndex, day, hours, minutes, 0, 0);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== monthIndex ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function parseClock(value) {
+  const text = normalizeForMatching(value);
+  const match = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?)?\b/);
+  if (!match) return null;
+
+  let hours = Number(match[1]);
+  const minutes = Number(match[2] || 0);
+  const meridiem = (match[3] || "").replace(/[.\s]/g, "");
+  if (minutes > 59 || hours > 23) return null;
+  if (meridiem === "pm" && hours < 12) hours += 12;
+  if (meridiem === "am" && hours === 12) hours = 0;
+  return { hours, minutes };
+}
+
+function parseDateCandidate(value) {
+  if (value == null) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const original = String(value).trim();
+  if (!original || /^https?:\/\//i.test(original)) return null;
+  const normalized = normalizeForMatching(original);
+
+  const spanish = normalized.match(
+    /\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s+de\s+(\d{4})\b/
+  );
+  if (spanish) {
+    const clock = parseClock(normalized.slice(spanish.index + spanish[0].length));
+    return validCalendarDate(
+      Number(spanish[3]),
+      SPANISH_MONTHS.get(spanish[2]),
+      Number(spanish[1]),
+      clock?.hours || 0,
+      clock?.minutes || 0
+    );
+  }
+
+  const isoDateTime = original.match(
+    /\b(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/
+  );
+  if (isoDateTime) {
+    const parsed = new Date(isoDateTime[0]);
+    if (!Number.isNaN(parsed.getTime()) && /[TZ+-]/.test(isoDateTime[0].slice(10))) {
+      return parsed;
+    }
+    return validCalendarDate(
+      Number(isoDateTime[1]),
+      Number(isoDateTime[2]) - 1,
+      Number(isoDateTime[3]),
+      Number(isoDateTime[4] || 0),
+      Number(isoDateTime[5] || 0)
+    );
+  }
+
+  const numeric = original.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/);
+  if (numeric) {
+    const first = Number(numeric[1]);
+    const second = Number(numeric[2]);
+    const year = Number(numeric[3]);
+    const clock = parseClock(original.slice((numeric.index || 0) + numeric[0].length));
+
+    // Flor operates in Mexico; use day/month unless only month/day is valid.
+    let day = first;
+    let month = second;
+    if (first <= 12 && second > 12) {
+      day = second;
+      month = first;
+    }
+    return validCalendarDate(
+      year,
+      month - 1,
+      day,
+      clock?.hours || 0,
+      clock?.minutes || 0
+    );
+  }
+
+  return null;
+}
+
+function collectScalarValues(value, pathParts = [], output = []) {
+  if (value == null) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      collectScalarValues(item, [...pathParts, String(index)], output)
+    );
+    return output;
+  }
+  if (typeof value === "object") {
+    Object.entries(value).forEach(([key, child]) =>
+      collectScalarValues(child, [...pathParts, key], output)
+    );
+    return output;
+  }
+  output.push({ path: pathParts.join("."), value });
+  return output;
+}
+
+function chooseUpcomingDate(candidates, now = new Date()) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const maximum = new Date(today);
+  maximum.setDate(maximum.getDate() + 120);
+
+  return candidates
+    .map((candidate) => ({ ...candidate, date: parseDateCandidate(candidate.value) }))
+    .filter(({ date }) => date && date >= today && date <= maximum)
+    .sort((a, b) => {
+      const aPriority = /fecha|date|start|inicio|evento|event/i.test(a.path) ? 0 : 1;
+      const bPriority = /fecha|date|start|inicio|evento|event/i.test(b.path) ? 0 : 1;
+      return aPriority - bPriority || a.date - b.date;
+    })[0] || null;
+}
+
+function extractPageDateCandidates(pageText) {
+  const text = String(pageText || "");
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const focused = [];
+
+  lines.forEach((line, index) => {
+    if (/proxima|próxima|siguiente|next event|videoconferencia/i.test(line)) {
+      focused.push(line, lines[index + 1] || "", lines[index + 2] || "");
+    }
+  });
+
+  const source = focused.length ? focused.join("\n") : text;
+  const patterns = [
+    /\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s+de\s+\d{4}(?:\s+(?:a\s+las\s+)?\d{1,2}(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)?/gi,
+    /\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?\b/g,
+    /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)?\b/gi,
+  ];
+
+  return patterns.flatMap((pattern) =>
+    Array.from(source.matchAll(pattern), (match) => ({ path: "page_text", value: match[0] }))
+  );
+}
+
+function resolveNextEventInfo(snapshot) {
+  const raw = snapshot?.nextEvent ?? null;
+  const scalars = collectScalarValues(raw);
+  const pageCandidates = extractPageDateCandidates(snapshot?.pageText || "");
+  const selectedDate = chooseUpcomingDate([...scalars, ...pageCandidates]);
+
+  const url = scalars
+    .filter(({ value }) => typeof value === "string" && /^https?:\/\//i.test(value.trim()))
+    .sort((a, b) => {
+      const aPriority = /zoom|url|link|enlace|meeting/i.test(a.path) ? 0 : 1;
+      const bPriority = /zoom|url|link|enlace|meeting/i.test(b.path) ? 0 : 1;
+      return aPriority - bPriority;
+    })[0]?.value || "";
+
+  const title = scalars.find(
+    ({ path, value }) =>
+      /titulo|title|nombre|name/i.test(path) &&
+      typeof value === "string" &&
+      !/^https?:\/\//i.test(value.trim())
+  )?.value || "Próxima videoconferencia de Flor";
+
+  const eventDate = selectedDate?.date ? new Date(selectedDate.date.getTime()) : null;
+  let hasTime = Boolean(
+    eventDate && (eventDate.getHours() !== 0 || eventDate.getMinutes() !== 0)
+  );
+  if (eventDate && !hasTime) {
+    const separateClock = scalars
+      .filter(({ path }) => /hora|time/i.test(path))
+      .map(({ value }) => parseClock(value))
+      .find(Boolean);
+    if (separateClock) {
+      eventDate.setHours(separateClock.hours, separateClock.minutes, 0, 0);
+      hasTime = true;
+    }
+  }
+
+  let status = "unresolved";
+  if (eventDate && url) status = "ready";
+  else if (eventDate) status = "date_only";
+  else if (url) status = "url_only";
+  else if (!raw) status = "no_next_event";
+
+  return {
+    date: eventDate ? formatDateOnly(eventDate) : "",
+    dateTime: eventDate && hasTime ? formatLocalDateTime(eventDate) : "",
+    url: String(url || ""),
+    title: String(title || ""),
+    checkedAt: new Date().toISOString(),
+    status,
+    rawPayload: JSON.stringify(raw || {}).slice(0, 12000),
+  };
+}
+
+function quoteSheetName(sheetName) {
+  return `'${String(sheetName).replace(/'/g, "''")}'`;
+}
+
+async function ensureScheduleSheet(sheets) {
+  const metadata = await sheets.spreadsheets.get({
+    spreadsheetId: WORK_LEDGER_SPREADSHEET_ID,
+    fields: "sheets.properties(title)",
+  });
+  const exists = (metadata.data.sheets || []).some(
+    (sheet) => sheet.properties?.title === WORK_LEDGER_SCHEDULE_SHEET
+  );
+  if (exists) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: WORK_LEDGER_SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: WORK_LEDGER_SCHEDULE_SHEET,
+              gridProperties: { rowCount: 50, columnCount: 7, frozenRowCount: 1 },
+            },
+          },
+        },
+      ],
+    },
+  });
+  console.log(`[SCHEDULE] Created sheet ${WORK_LEDGER_SCHEDULE_SHEET}`);
+}
+
+async function updateNextEventLedger(sheets, nextEventInfo) {
+  await ensureScheduleSheet(sheets);
+  const range = `${quoteSheetName(WORK_LEDGER_SCHEDULE_SHEET)}!A1:G2`;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: WORK_LEDGER_SPREADSHEET_ID,
+    range,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [
+        [
+          "next_event_date",
+          "next_event_datetime",
+          "next_event_url",
+          "next_event_title",
+          "checked_at",
+          "status",
+          "raw_payload",
+        ],
+        [
+          nextEventInfo.date,
+          nextEventInfo.dateTime,
+          nextEventInfo.url,
+          nextEventInfo.title,
+          nextEventInfo.checkedAt,
+          nextEventInfo.status,
+          nextEventInfo.rawPayload,
+        ],
+      ],
+    },
+  });
+
+  console.log(
+    `[SCHEDULE] Updated next event: date=${nextEventInfo.date || "unknown"} ` +
+      `status=${nextEventInfo.status} url=${nextEventInfo.url ? "available" : "missing"}`
+  );
 }
 
 async function findDriveFileByName(drive, filename) {
@@ -1410,6 +1735,7 @@ async function scrapeData(limit = MAX_VIDEOS) {
   });
 
   let hadItemFailures = false;
+  let scheduleFailure = null;
   try {
     await verifyLoadedVimeoExtension(browser);
     const pages = await browser.pages();
@@ -1424,6 +1750,7 @@ async function scrapeData(limit = MAX_VIDEOS) {
 
     const jwtClient = await authorize(parseGoogleCredentials());
     const drive = google.drive({ version: "v3", auth: jwtClient });
+    const sheets = google.sheets({ version: "v4", auth: jwtClient });
     console.log("[GOOGLE] Authorized");
 
     page.setDefaultNavigationTimeout(60000);
@@ -1484,6 +1811,18 @@ async function scrapeData(limit = MAX_VIDEOS) {
       { timeout: 20000 }
     );
 
+    const nextEventSnapshot = await page.evaluate(() => ({
+      nextEvent: window.__NUXT__?.data?.[0]?.nextEvent || null,
+      pageText: document.body?.innerText || "",
+    }));
+    const nextEventInfo = resolveNextEventInfo(nextEventSnapshot);
+    try {
+      await updateNextEventLedger(sheets, nextEventInfo);
+    } catch (error) {
+      scheduleFailure = error;
+      console.error(`[SCHEDULE][ERROR] ${safeErrorMessage(error)}`);
+    }
+
     let videoconferencias = await page.evaluate(
       () => window.__NUXT__.data[0].videoconferencias
     );
@@ -1505,8 +1844,11 @@ async function scrapeData(limit = MAX_VIDEOS) {
     await browser.close().catch(() => {});
   }
 
-  if (hadItemFailures) {
-    throw new Error("One or more videos failed; the next run will retry them");
+  if (hadItemFailures || scheduleFailure) {
+    const failures = [];
+    if (hadItemFailures) failures.push("one or more videos failed");
+    if (scheduleFailure) failures.push("the next-event ledger update failed");
+    throw new Error(`${failures.join("; ")}; the next run will retry`);
   }
 }
 

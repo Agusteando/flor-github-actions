@@ -1,1 +1,1 @@
-Usa un video como límite predeterminado de la ingesta
+Actualiza diariamente la próxima videoconferencia en el ledger de Flor
