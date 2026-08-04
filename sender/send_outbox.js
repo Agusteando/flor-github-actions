@@ -10,6 +10,7 @@ const IMPERSONATED_USER = process.env.GOOGLE_IMPERSONATED_USER || "";
 const SIGNATURE_URL = process.env.FLOR_EMAIL_SIGNATURE_URL || "https://expediente.casitaapps.com/signatures/desarrollo_tecnologico_casitaiedis_edu_mx.jpg?v=1784669030140";
 const MAX_ATTEMPTS = Number.parseInt(process.env.FLOR_OUTBOX_MAX_ATTEMPTS || "5", 10);
 const STALE_SENDING_MINUTES = Number.parseInt(process.env.FLOR_OUTBOX_STALE_MINUTES || "30", 10);
+const TARGET_OUTBOX_ID = String(process.env.FLOR_OUTBOX_ID || "").trim();
 
 function required(value, name) {
   if (!String(value || "").trim()) throw new Error(`Missing required environment variable: ${name}`);
@@ -344,9 +345,24 @@ async function findSentByMessageId(gmail, messageId) {
   return response.data.messages?.[0]?.id || "";
 }
 
+async function getLedgerDelivery(sheets, conferenceId) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${quoteSheetName(LEDGER_SHEET)}!A2:K1000`,
+  });
+  const rows = response.data.values || [];
+  const values = rows.find((candidate) => String(candidate?.[0] ?? "").trim() === String(conferenceId));
+  if (!values) return null;
+  return {
+    status: String(values?.[5] ?? "").trim().toLowerCase(),
+    gmailMessageId: String(values?.[6] ?? "").trim(),
+    sentAt: String(values?.[7] ?? "").trim(),
+  };
+}
+
 async function processRow({ sheets, gmail, row, signatureBytes }) {
   validateRow(row);
-  const deterministicMessageId = `flor-${row.conferenceId}-${row.outboxId}@casitaiedis.edu.mx`
+  const deterministicMessageId = `flor-conference-${row.conferenceId}@casitaiedis.edu.mx`
     .replace(/[^a-zA-Z0-9@._-]/g, "-")
     .toLowerCase();
 
@@ -361,7 +377,20 @@ async function processRow({ sheets, gmail, row, signatureBytes }) {
       lastError: "",
     });
     await upsertLedgerSent(sheets, row, existingMessageId, reconciledSentAt);
-    console.log(`[OUTBOX] Reconciled already-sent row ${row.rowNumber} (${row.outboxId})`);
+    console.log(`[OUTBOX] Reconciled Gmail delivery for conference ${row.conferenceId}`);
+    return;
+  }
+
+  const ledgerDelivery = await getLedgerDelivery(sheets, row.conferenceId);
+  if (ledgerDelivery && (ledgerDelivery.status === "sent" || ledgerDelivery.gmailMessageId)) {
+    const reconciledSentAt = ledgerDelivery.sentAt || new Date().toISOString();
+    await updateRow(sheets, row.rowNumber, {
+      status: "sent",
+      sentAt: reconciledSentAt,
+      gmailMessageId: ledgerDelivery.gmailMessageId,
+      lastError: "",
+    });
+    console.log(`[OUTBOX] Skipped conference ${row.conferenceId}; Ledger already records delivery`);
     return;
   }
 
@@ -423,13 +452,19 @@ async function main() {
     range: `${quoteSheetName(OUTBOX_SHEET)}!A2:P500`,
   });
   const rows = (response.data.values || []).map((values, index) => mapRow(values, index + 2));
-  const pending = rows.filter(isEligible);
+  let pending = rows.filter(isEligible);
+  if (TARGET_OUTBOX_ID) {
+    pending = pending.filter((row) => row.outboxId === TARGET_OUTBOX_ID);
+    if (!pending.length) {
+      throw new Error(`No eligible Outbox row found for FLOR_OUTBOX_ID=${TARGET_OUTBOX_ID}`);
+    }
+  }
   if (!pending.length) {
     console.log("[OUTBOX] No pending email");
     return;
   }
 
-  console.log(`[OUTBOX] ${pending.length} pending email(s)`);
+  console.log(`[OUTBOX] ${pending.length} pending email(s)${TARGET_OUTBOX_ID ? ` for ${TARGET_OUTBOX_ID}` : ""}`);
   const signatureBytes = await downloadSignature();
   let failures = 0;
   for (const row of pending) {

@@ -1,9 +1,12 @@
 name: Flor summary email sender
 
 on:
-  schedule:
-    - cron: "7 * * * *"
   workflow_dispatch:
+    inputs:
+      outbox_id:
+        description: "Optional exact Outbox ID to process"
+        required: false
+        type: string
 
 concurrency:
   group: flor-summary-email-sender
@@ -23,6 +26,7 @@ jobs:
       FLOR_WORK_LEDGER_SPREADSHEET_ID: ${{ vars.FLOR_WORK_LEDGER_SPREADSHEET_ID || '1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA' }}
       FLOR_OUTBOX_SHEET: Outbox
       FLOR_LEDGER_SHEET: Ledger
+      FLOR_OUTBOX_ID: ${{ inputs.outbox_id || '' }}
       FLOR_EMAIL_SIGNATURE_URL: https://expediente.casitaapps.com/signatures/desarrollo_tecnologico_casitaiedis_edu_mx.jpg?v=1784669030140
       TZ: America/Mexico_City
 

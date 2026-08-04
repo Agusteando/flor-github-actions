@@ -1,1 +1,1 @@
-Añade cola segura y envío HTML de resúmenes por Gmail
+Refuerza el envío único y el disparo manual de resúmenes
