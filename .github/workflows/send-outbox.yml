@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       outbox_id:
-        description: "Optional exact Outbox ID to process"
+        description: "Exact Outbox ID"
         required: false
         type: string
+      force_resend:
+        description: "Force a new delivery for manual testing only"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: flor-summary-email-sender
@@ -19,31 +24,24 @@ jobs:
   send:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
       FLOR_WORK_LEDGER_SPREADSHEET_ID: ${{ vars.FLOR_WORK_LEDGER_SPREADSHEET_ID || '1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA' }}
       FLOR_OUTBOX_SHEET: Outbox
       FLOR_LEDGER_SHEET: Ledger
+      FLOR_RESOURCES_SHEET: Resources
       FLOR_OUTBOX_ID: ${{ inputs.outbox_id || '' }}
+      FLOR_FORCE_RESEND: ${{ inputs.force_resend || false }}
+      FLOR_EMAIL_MAX_ATTACHMENTS_BYTES: "18874368"
       FLOR_EMAIL_SIGNATURE_URL: https://expediente.casitaapps.com/signatures/desarrollo_tecnologico_casitaiedis_edu_mx.jpg?v=1784669030140
       TZ: America/Mexico_City
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "24"
-
-      - name: Install sender dependency
-        run: npm install --prefix sender --omit=dev
-
-      - name: Validate sender
-        run: node --check sender/send_outbox.js
-
-      - name: Send pending Flor summary emails
-        run: node sender/send_outbox.js
+      - run: npm install --prefix sender --omit=dev
+      - run: node --check sender/send_outbox_resources.js
+      - name: Send Flor summary email
+        run: node sender/send_outbox_resources.js
