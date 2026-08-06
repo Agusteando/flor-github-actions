@@ -1,0 +1,46 @@
+name: Flor conference resource sync
+
+on:
+  workflow_run:
+    workflows: ["Flor recording ingestion"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      max_videos:
+        description: "Conferences to inspect"
+        required: false
+        default: "1"
+        type: string
+
+concurrency:
+  group: flor-resource-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FLOR_USERNAME: ${{ secrets.FLOR_USERNAME }}
+      FLOR_PASSWORD: ${{ secrets.FLOR_PASSWORD }}
+      FLOR_SITE_BASE_URL: ${{ vars.FLOR_SITE_BASE_URL || 'https://buenainfancia.com.mx' }}
+      FLOR_STRAPI_BASE_URL: ${{ vars.FLOR_STRAPI_BASE_URL || 'https://strapi.buenainfancia.com.mx' }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+      GOOGLE_IMPERSONATED_USER: ${{ secrets.GOOGLE_IMPERSONATED_USER }}
+      FLOR_WORK_LEDGER_SPREADSHEET_ID: ${{ vars.FLOR_WORK_LEDGER_SPREADSHEET_ID || '1_pQk5GbdUXBs64xsCLg8s0L6zRORZqi5NpTZV4z1IdA' }}
+      MAX_VIDEOS: ${{ inputs.max_videos || '1' }}
+      PUPPETEER_HEADLESS: "true"
+      TZ: America/Mexico_City
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --omit=dev
+      - run: npx puppeteer browsers install chrome
+      - name: Sync conference resources
+        run: node resources/sync_resources.js
