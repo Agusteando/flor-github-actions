@@ -1,0 +1,22 @@
+name: Dispatch Flor resource sync
+
+on:
+  push:
+    paths:
+      - .dispatch/flor-resources.json
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trigger resource workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MAX_VIDEOS="$(jq -r '.max_videos // "1"' .dispatch/flor-resources.json)"
+          gh workflow run sync-resources.yml --ref main -f max_videos="$MAX_VIDEOS"
