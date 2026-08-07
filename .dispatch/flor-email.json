@@ -1,5 +1,1 @@
-{
-  "outbox_id": "244-html-final-20260804",
-  "requested_at": "2026-08-04T17:52:00-06:00",
-  "requested_by": "chatgpt"
-}
+{"outbox_id":"244-html-final-20260804","force_resend":true,"requested_at":"2026-08-07T00:09:37Z","request_nonce":"flor-resources-email-test-20260807T000937Z"}
